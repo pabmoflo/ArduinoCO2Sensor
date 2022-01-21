@@ -7,6 +7,7 @@ import paho.mqtt.client as mqtt
 import uuid
 from datetime import datetime, timedelta
 import requests
+import threading
 
 # MQTT topics
 ANNOUNCE_TOPIC = "CO2S/announce"
@@ -20,9 +21,11 @@ configStruct = struct.Struct("<5H2h") # 5 unsigned shorts, 2 signed shorts
 dataStruct = struct.Struct("<16s2h") # 16 bytes (UUID), 2 signed shorts
 
 # MQTT client and other data structures
+# Use a lock to prevent the mqtt thread and the main thread to access connectedDevices at the same time
 client : mqtt.Client = None 
 configData = {}
 connectedDevices = {}
+connectedLock = threading.Lock()
 
 # The callback for when the client receives a CONNACK response from the server.
 def on_connect(client, userdata, flags, rc):
@@ -38,26 +41,28 @@ def on_publish(client, userdata, mid):
 
 # The callback for when a MQTT message is recieved
 def on_message(client, userdata, msg):
+    global connectedLock
     # Announcement message recieved
     if (msg.topic == ANNOUNCE_TOPIC):
-        try:
-            # Make sure it's the proper size
-            assert len(msg.payload) == announceResetStruct.size
-            # Get the UUID
-            newDevice = uuid.UUID(bytes=announceResetStruct.unpack(msg.payload)[0])
-            # Check the device is already connected
-            if (newDevice in connectedDevices):
-                # The device may have rebooted due to error, so we remove it before connecting again
-                del connectedDevices[newDevice]
-            # Initialize the values to calculate the mean
-            connectedDevices[newDevice] = [0, 0, 0] # CO2, temp, times
-            # Print and send the config
-            print("{} has connected ({})!".format(getDeviceName(newDevice), str(newDevice)))
-            sendConfig(newDevice)
-        except:
-            print("Got corrupted annoucement data!")
-            traceback.print_exc()
-            pass
+        with connectedLock:
+            try:
+                # Make sure it's the proper size
+                assert len(msg.payload) == announceResetStruct.size
+                # Get the UUID
+                newDevice = uuid.UUID(bytes=announceResetStruct.unpack(msg.payload)[0])
+                # Check the device is already connected
+                if (newDevice in connectedDevices):
+                    # The device may have rebooted due to error, so we remove it before connecting again
+                    del connectedDevices[newDevice]
+                # Initialize the values to calculate the mean
+                connectedDevices[newDevice] = [0, 0, 0] # CO2, temp, times
+                # Print and send the config
+                print("{} has connected ({})!".format(getDeviceName(newDevice), str(newDevice)))
+                sendConfig(newDevice)
+            except:
+                print("Got corrupted annoucement data!")
+                traceback.print_exc()
+                pass
     # Data message recieved
     if (msg.topic == DATA_TOPIC):
         try:
@@ -74,10 +79,11 @@ def on_message(client, userdata, msg):
                 client.publish(CONFIG_TOPIC + "/" + str(device)[24:], b'aaaaaaa')
             # Print the recieved values and store them to calculate the mean later
             else:
-                print("{} ({}): CO2: {}ppm, Temp: {}ºC".format(getDeviceName(device), str(device), data[1], data[2]))
-                connectedDevices[device][0] += data[1]
-                connectedDevices[device][1] += data[2]
-                connectedDevices[device][2] += 1
+                with connectedLock:
+                    print("{} ({}): CO2: {}ppm, Temp: {}ºC".format(getDeviceName(device), str(device), data[1], data[2]))
+                    connectedDevices[device][0] += data[1]
+                    connectedDevices[device][1] += data[2]
+                    connectedDevices[device][2] += 1
         except:
             print("Got corrupted annoucement data!")
             traceback.print_exc()
@@ -205,6 +211,7 @@ def sendUbidotsPayload(payload, deviceName):
 def main():
     global client
     global configData
+    global connectedLock
     if (len(sys.argv) != 2):
         print("Invalid arguments\nUsage: {} (configFile)".format(sys.argv[0]))
         sys.exit(1)
@@ -242,17 +249,18 @@ def main():
                     lastDataSent = datetime.now()
                     continue
                 # For each device connected
-                for device in connectedDevices:
-                    deviceData = connectedDevices[device]
-                    if (deviceData[2] == 0):
-                        continue
-                    # Generate the mean of CO2 and temperature and send it to Ubidots using the config
-                    co2Mean = deviceData[0] // deviceData[2]
-                    tempMean = deviceData[1] // deviceData[2]
-                    print("Sending data for {}: CO2: {}ppm, Temp: {}ºC".format(str(device), co2Mean, tempMean))
-                    sendUbidotsPayload({configData["reportConfig"]["co2VariableName"]: co2Mean, configData["reportConfig"]["tempVariableName"]: tempMean}, configData["devices"][str(device)]["apiName"])
-                    # Reset the data to start calculating the mean again
-                    connectedDevices[device] = [0, 0, 0]
+                with connectedLock:
+                    for device in connectedDevices:
+                        deviceData = connectedDevices[device]
+                        if (deviceData[2] == 0):
+                            continue
+                        # Generate the mean of CO2 and temperature and send it to Ubidots using the config
+                        co2Mean = deviceData[0] // deviceData[2]
+                        tempMean = deviceData[1] // deviceData[2]
+                        print("Sending data for {}: CO2: {}ppm, Temp: {}ºC".format(str(device), co2Mean, tempMean))
+                        sendUbidotsPayload({configData["reportConfig"]["co2VariableName"]: co2Mean, configData["reportConfig"]["tempVariableName"]: tempMean}, configData["devices"][str(device)]["apiName"])
+                        # Reset the data to start calculating the mean again
+                        connectedDevices[device] = [0, 0, 0]
                 lastDataSent = datetime.now()
             sleep(0.1)
     except KeyboardInterrupt:
