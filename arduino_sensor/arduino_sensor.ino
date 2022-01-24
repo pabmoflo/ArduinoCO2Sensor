@@ -86,7 +86,11 @@ enum class LedColor : unsigned long {
 
 // Change these variables to change the LED color and the buzzer state 
 static volatile LedColor ledColor;
-static volatile bool buzzState; // 0 -> Disable, 1 -> Enable, 2 -> Force
+static volatile int buzzState = 0; // 0 -> Disable, 1 -> Enable, 2 -> Force
+
+// Variables used to calculate the elapsed time while ticking the LED and buzzer
+static unsigned int prevTickTime = 0;
+static unsigned int currTickTime = 0;
 
 // Function to immediately change the LED color
 void setLedColor(LedColor color) {
@@ -109,48 +113,48 @@ void doBuzz(unsigned int msec) {
 // Function that handles the state of the LED
 void tickLED() {
   static unsigned int ledCounter = 0;
-  static unsigned int lastCounterVal = 0;
   static bool ledEnabled = false;
+  ledCounter += (currTickTime - prevTickTime);
   // If the LED is enabled in the config
   if (currConfig.enableLEDEverySec >= 0) {
     if (ledEnabled) {
       // Disable the led after 1 second if it's enabled (if the config is 0, keep it enabled always)
-      if ((ledCounter - lastCounterVal) >= 10 && (currConfig.enableLEDEverySec != 0)) {
+      if (ledCounter >= 100 && (currConfig.enableLEDEverySec != 0)) {
         setLedColor(LedColor::BLACK);
-        lastCounterVal = ledCounter;
+        ledCounter = 0;
         ledEnabled = false;
       }
     } else {
       // Enable the led after the time specified in the config
-      if ((ledCounter - lastCounterVal) >= currConfig.enableLEDEverySec * 10) {
+      if (ledCounter >= currConfig.enableLEDEverySec * 100) {
         setLedColor(ledColor);
-        lastCounterVal = ledCounter;
+        ledCounter = 0;
         ledEnabled = true;
       }
     }
   }
-  ledCounter++;
 }
 
 // Function that handles the state of the buzzer
 void tickBuzz() {
   static unsigned int buzzCounter = 0;
-  static unsigned int lastBuzzCounterVal = 0;
+  buzzCounter += (currTickTime - prevTickTime); 
   if (buzzState > 0 && currConfig.makeBuzzEverySec > 0) {
     // Do a 500ms buzz after the time specified in the config, or force it if the state is set to 2
-    if (buzzState == 2 || buzzCounter - lastBuzzCounterVal >= currConfig.makeBuzzEverySec * 10) {
+    if (buzzState == 2 || buzzCounter >= (currConfig.makeBuzzEverySec * 100)) {
       doBuzz(500);
-      lastBuzzCounterVal = buzzCounter;
+      buzzCounter = 0;
       if (buzzState == 2) buzzState = 1;
     }
   }
-  buzzCounter++;
 }
 
 // Function that handles the state of the LED and the buzzer, should be called about every 100ms
 void tickLEDBuzzer() {
+  currTickTime = millis() / 10;
   tickLED();
   tickBuzz();
+  prevTickTime = currTickTime;
 }
 
 // Function to test the LED and buzzer are working properly, called when the device reboots
@@ -325,18 +329,19 @@ void mqttcallback(char* topic, byte* payload, unsigned int length) {
 // Function that gets called repeatedly after setup()
 void loop() {
   static unsigned int counter = 0;
+  static unsigned int secondaryCounter = 0;
   static unsigned int oldCounter = 0;
   static unsigned int measurementsTaken = 0;
   static unsigned long currCO2Total = 0;
   static unsigned long currTempTotal = 0;
   static unsigned int configNotRecievedCounter = 0;
-  // Wait 100ms for correct timing and to allow the wifi module to process data
-  delay(100);
+  // Wait 50ms for correct timing and to allow the wifi module to process data
+  delay(50);
   // Tick the MQTT client, if it fails try to reconnect
   if (!client.loop()) {
     reconnect();
   // If not waiting for config (already go it)
-  } else if (!waitingForConfig) {
+  } else if (!waitingForConfig && (secondaryCounter & 1)) {
     // Take measurements when it's time to do so
     if (counter - oldCounter >= currConfig.measureEachMsec / 100) {
       // Obtain CO2 and temperature values and add them to current total
@@ -389,7 +394,7 @@ void loop() {
           buzzState = 0;
         } else {
           ledColor = LedColor::RED;
-          buzzState = 2; // Force a beep and enable the buzzer
+          if (buzzState == 0) buzzState = 2; // Force a beep and enable the buzzer
         }
 
         // Reset the variables
@@ -400,7 +405,7 @@ void loop() {
       oldCounter = counter;
     }
   // If we are waiting for the configuration
-  } else if (waitingForConfig) {
+  } else if (waitingForConfig && (secondaryCounter & 1)) {
     // Step 1: Subscribe to the configuration topic
     if (subscribedToConfTimer) {
       if (subscribedToConfTimer == 50) {
@@ -442,9 +447,12 @@ void loop() {
       while(true);
     }
   }
-  counter++;
-  // Tick the LED and buzzer
-  tickLEDBuzzer();
+  if (secondaryCounter & 1) {
+    counter++;
+    // Tick the LED and buzzer
+    tickLEDBuzzer();
+  }
+  secondaryCounter++;
   // Reset the watchdog, to indicate the code is running and prevent an automatic reboot
   wdt_reset();
 }
