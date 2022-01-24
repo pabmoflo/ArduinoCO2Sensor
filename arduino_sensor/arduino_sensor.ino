@@ -294,7 +294,7 @@ void setup() {
 // Variables to keep track of process
 static bool waitingForConfig = true;
 static bool announcementSent = false;
-static int subscribedToConfTimer = 50;
+static int subscribedToConfTimer = 100;
 
 // Final MQTT topic for recieving the config data
 char finalConfigtopic[30] = { 0 };
@@ -326,24 +326,29 @@ void mqttcallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+// Variables used to calculate the elapsed time for taking samples
+static unsigned int prevSampleTime = 0;
+static unsigned int currSampleTime = 0;
+
 // Function that gets called repeatedly after setup()
 void loop() {
   static unsigned int counter = 0;
-  static unsigned int secondaryCounter = 0;
-  static unsigned int oldCounter = 0;
   static unsigned int measurementsTaken = 0;
   static unsigned long currCO2Total = 0;
   static unsigned long currTempTotal = 0;
   static unsigned int configNotRecievedCounter = 0;
-  // Wait 50ms for correct timing and to allow the wifi module to process data
+  // Wait 50ms to allow the wifi module to process data
   delay(50);
+  currSampleTime = millis() / 10;
+  counter += currSampleTime - prevSampleTime;
   // Tick the MQTT client, if it fails try to reconnect
   if (!client.loop()) {
     reconnect();
   // If not waiting for config (already go it)
-  } else if (!waitingForConfig && (secondaryCounter & 1)) {
+  } else if (!waitingForConfig) {
     // Take measurements when it's time to do so
-    if (counter - oldCounter >= currConfig.measureEachMsec / 100) {
+    if (counter >= currConfig.measureEachMsec / 10) {
+      counter = 0;
       // Obtain CO2 and temperature values and add them to current total
       currCO2Total += co2Sensor.getCO2();
       currTempTotal += co2Sensor.getTemperature();
@@ -402,13 +407,12 @@ void loop() {
         currCO2Total = 0;
         currTempTotal = 0;
       }
-      oldCounter = counter;
     }
   // If we are waiting for the configuration
-  } else if (waitingForConfig && (secondaryCounter & 1)) {
+  } else if (waitingForConfig) {
     // Step 1: Subscribe to the configuration topic
     if (subscribedToConfTimer) {
-      if (subscribedToConfTimer == 50) {
+      if (subscribedToConfTimer == 100) {
         Serial.print("Subscribing to config topic: ");
         // Build the topic string from the last segment of the UUID
         char uuidlast[13];
@@ -447,12 +451,13 @@ void loop() {
       while(true);
     }
   }
-  if (secondaryCounter & 1) {
-    counter++;
-    // Tick the LED and buzzer
-    tickLEDBuzzer();
-  }
-  secondaryCounter++;
+  
+  // Tick LED and Buzzer
+  tickLEDBuzzer();
+
+  // Save the current sample time
+  prevSampleTime = currSampleTime;
+
   // Reset the watchdog, to indicate the code is running and prevent an automatic reboot
   wdt_reset();
 }
